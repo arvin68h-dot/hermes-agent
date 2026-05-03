@@ -148,7 +148,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_with_query, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -1840,6 +1840,15 @@ class AIAgent:
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+        # v3 new settings
+        _tw = _compression_cfg.get("type_weights", None)
+        if isinstance(_tw, dict):
+            compression_type_weights: Dict[str, float] = {k: float(v) for k, v in _tw.items()}
+        else:
+            compression_type_weights = None
+        compression_condense_after_turns = int(_compression_cfg.get("condense_after_turns", 6))
+        compression_retrievable_index = str(_compression_cfg.get("retrievable_index_enabled", True)).lower() in ("true", "1", "yes")
+        compression_hygiene_limit = int(_compression_cfg.get("hygiene_hard_message_limit", 400))
 
         # Read optional explicit context_length override for the auxiliary
         # compression model. Custom endpoints often cannot report this via
@@ -2023,6 +2032,11 @@ class AIAgent:
                 config_context_length=_config_context_length,
                 provider=self.provider,
                 api_mode=self.api_mode,
+                # v3 new parameters
+                condense_after_turns=compression_condense_after_turns,
+                retrievable_index_enabled=compression_retrievable_index,
+                type_weights=compression_type_weights,
+                hygiene_hard_message_limit=compression_hygiene_limit,
             )
         self.compression_enabled = compression_enabled
 
@@ -4958,10 +4972,21 @@ class AIAgent:
                 )
                 if toolset
             }
-            skills_prompt = build_skills_system_prompt(
-                available_tools=self.valid_tool_names,
-                available_toolsets=avail_toolsets,
-            )
+            # BM25-based skill routing: if a user query is available, use
+            # the query-aware builder to inject only the top-5 most relevant
+            # skill contents. Falls back to the standard full-index builder.
+            _query = (system_message or "").strip() if system_message else ""
+            if _query and len(_query) >= 3:
+                skills_prompt = build_skills_system_prompt_with_query(
+                    query=_query,
+                    available_tools=self.valid_tool_names,
+                    available_toolsets=avail_toolsets,
+                )
+            else:
+                skills_prompt = build_skills_system_prompt(
+                    available_tools=self.valid_tool_names,
+                    available_toolsets=avail_toolsets,
+                )
         else:
             skills_prompt = ""
         if skills_prompt:

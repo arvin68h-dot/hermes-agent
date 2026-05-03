@@ -1177,4 +1177,110 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
 
     if not sections:
         return ""
+
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+
+# ── BM25-Based Skill Routing (Phase 1) ─────────────────────────────────────
+
+def _load_skill_full_content(skill_path: str) -> str:
+    """Load the full content of a SKILL.md file.
+
+    Returns empty string if the file cannot be read.
+    """
+    try:
+        return Path(skill_path).read_text(encoding="utf-8")
+    except Exception as e:
+        logger.debug("Failed to read skill %s: %s", skill_path, e)
+        return ""
+
+
+def build_skills_system_prompt_with_query(
+    query: str,
+    available_tools: "set[str] | None" = None,
+    available_toolsets: "set[str] | None" = None,
+) -> str:
+    """Build skill system prompt with BM25-based Top-K content injection.
+
+    This function:
+      1. Builds the standard skill index (name + description only)
+      2. Uses BM25 to find the top-5 most relevant skills for the query
+      3. Injects the full SKILL.md content of those top-5 skills into the prompt
+      4. Instructs the LLM to use ONLY the injected skills
+
+    This significantly reduces context window usage: instead of the LLM
+    potentially loading 10-20 full SKILL.md files, it only sees the ~5
+    most relevant ones.
+
+    Args:
+        query: User query / conversation context for relevance ranking.
+        available_tools: Set of available tool names (for conditional filtering).
+        available_toolsets: Set of available toolset names.
+
+    Returns:
+        Modified skills system prompt with Top-K full content injection.
+    """
+    # Step 1: Build standard skill index
+    base_prompt = build_skills_system_prompt(
+        available_tools=available_tools,
+        available_toolsets=available_toolsets,
+    )
+
+    if not query or len(query.strip()) < 3:
+        return base_prompt
+
+    # Step 2: BM25 query
+    try:
+        from agent.bm25_skill_index import BM25SkillIndex
+        index = BM25SkillIndex()
+        results = index.query(query, top_k=5)
+    except Exception as e:
+        logger.debug("BM25 skill routing failed, falling back to standard prompt: %s", e)
+        return base_prompt
+
+    if not results:
+        return base_prompt
+
+    # Step 3: Load full content for top-K skills
+    # Filter out already-loaded skills to avoid duplication
+    _seen_skill_names: set[str] = set()
+    _relevant_sections: list[str] = []
+
+    for skill_name, skill_path, score in results:
+        if skill_name in _seen_skill_names:
+            continue
+        _seen_skill_names.add(skill_name)
+
+        full_content = _load_skill_full_content(skill_path)
+        if not full_content:
+            continue
+
+        # Truncate to keep injection manageable (~1.5K per skill, ~7.5K total)
+        _MAX_INJECT_CHARS = 1500
+        body = full_content
+        prefix = ""
+        if "---\n" in body:
+            parts = body.split("---\n", 2)
+            if len(parts) >= 3:
+                prefix = parts[0] + "---\n" + parts[1] + "---\n"
+                body = parts[2]
+                if len(body) > _MAX_INJECT_CHARS:
+                    body = body[:_MAX_INJECT_CHARS] + " [truncated]"
+
+        section = f"### 📌 {skill_name} (auto-selected, relevance: {score:.3f})\n\n{prefix}{body}"
+        _relevant_sections.append(section)
+
+    if not _relevant_sections:
+        return base_prompt
+
+    # Step 4: Construct injection block
+    injection = (
+        "\n\n"
+        "## Relevant Skills (auto-selected by BM25)\n"
+        "The following skills are highly relevant to your current task based on BM25 "
+        "semantic matching. Read and apply them immediately. **Do NOT attempt to load "
+        "any other skills** not listed below — these are the only skills relevant to this task.\n\n"
+        + "\n\n".join(_relevant_sections)
+    )
+
+    return base_prompt + injection
