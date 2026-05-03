@@ -259,12 +259,38 @@ _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
     "kimi-coding-cn",
 })
 
-# OpenRouter app attribution headers
-_OR_HEADERS = {
+# OpenRouter app attribution headers (base — always sent)
+_OR_HEADERS_BASE = {
     "HTTP-Referer": "https://hermes-agent.nousresearch.com",
     "X-OpenRouter-Title": "Hermes Agent",
     "X-OpenRouter-Categories": "productivity,cli-agent",
 }
+
+# Legacy alias — static headers without response caching.
+# Callers that need config-aware caching headers should use build_or_headers().
+_OR_HEADERS = dict(_OR_HEADERS_BASE)
+
+
+def build_or_headers(or_config: dict | None = None) -> dict:
+    """Build OpenRouter headers, optionally including response-cache headers.
+
+    *or_config* is the ``openrouter`` section from config.yaml (a dict with
+    ``response_cache`` and ``response_cache_ttl`` keys).  When *None*, falls
+    back to reading config from disk via ``load_config()``.
+    """
+    headers = dict(_OR_HEADERS_BASE)
+    if or_config is None:
+        try:
+            from hermes_cli.config import load_config
+            or_config = load_config().get("openrouter", {})
+        except Exception:
+            or_config = {}
+    if or_config.get("response_cache", False):
+        headers["X-OpenRouter-Cache"] = "true"
+        ttl = or_config.get("response_cache_ttl", 300)
+        if isinstance(ttl, (int, float)) and 1 <= ttl <= 86400:
+            headers["X-OpenRouter-Cache-TTL"] = str(int(ttl))
+    return headers
 
 # Vercel AI Gateway app attribution headers. HTTP-Referer maps to
 # referrerUrl and X-Title maps to appName in the gateway's analytics.
@@ -1158,14 +1184,14 @@ def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Opt
         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
         logger.debug("Auxiliary client: OpenRouter via pool")
         return OpenAI(api_key=or_key, base_url=base_url,
-                       default_headers=_OR_HEADERS), _OPENROUTER_MODEL
+                       default_headers=build_or_headers()), _OPENROUTER_MODEL
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
-                   default_headers=_OR_HEADERS), _OPENROUTER_MODEL
+                   default_headers=build_or_headers()), _OPENROUTER_MODEL
 
 
 def _describe_openrouter_unavailable() -> str:
@@ -1911,7 +1937,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     }
     sync_base_url = str(sync_client.base_url)
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
-        async_kwargs["default_headers"] = dict(_OR_HEADERS)
+        async_kwargs["default_headers"] = build_or_headers()
     elif base_url_host_matches(sync_base_url, "api.githubcopilot.com"):
         from hermes_cli.copilot_auth import copilot_request_headers
 
