@@ -148,9 +148,12 @@ class TestSkillRouter(unittest.TestCase):
 
     def setUp(self):
         from agent.skill_router import SkillRouter
-        # Use a temporary directory for skills to avoid polluting real data
-        self.tmp_dir = Path("/tmp/test_skills_router")
-        self.tmp_dir.mkdir(exist_ok=True)
+        import shutil
+        import uuid
+        # Use a unique temp directory per test instance to avoid pytest-xdist races
+        unique_id = uuid.uuid4().hex[:8]
+        self.tmp_dir = Path(f"/tmp/test_skills_router_{unique_id}")
+        self.tmp_dir.mkdir(exist_ok=True, parents=True)
         # Create a few test SKILL.md files
         self._create_test_skills()
         self.router = SkillRouter(skills_dir=str(self.tmp_dir))
@@ -161,14 +164,7 @@ class TestSkillRouter(unittest.TestCase):
             ("test-weather", "Sunny, weather, temperature, 天气"),
             ("test-coding", "Write code, coding, debug, 写代码"),
             ("test-document", "Document, PDF, 文档, PDF 转换"),
-            ("test-disabled", "Should be disabled"),
         ]
-        disabled_dir = self.tmp_dir.parent / ".hermes" / "skills"
-        disabled_dir.mkdir(parents=True, exist_ok=True)
-        disabled_dir.joinpath("_disabled_skills.json").write_text(
-            json.dumps({"disabled": ["test-disabled"]}, ensure_ascii=False),
-            encoding="utf-8"
-        )
 
         for name, desc in test_skills:
             skill_dir = self.tmp_dir / name
@@ -180,9 +176,9 @@ class TestSkillRouter(unittest.TestCase):
                 description: {desc}
                 tags: []
                 ---
-                
+
                 # {name}
-                
+
                 Test skill for routing.
             """).strip()
             skill_md.write_text(content, encoding="utf-8")

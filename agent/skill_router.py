@@ -26,9 +26,7 @@ Usage:
 
 import json
 import logging
-import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -236,9 +234,10 @@ class RuleRouter:
             [(skill_name, skill_path, score, "rule"), ...]
         """
         matched = {}  # skill_id -> max_priority
-        
+
+        input_lower = user_input.lower()
+
         for priority, rule_name, patterns, skill_ids in self.RULES:
-            input_lower = user_input.lower()
             for pattern in patterns:
                 pat_lower = pattern.lower()
                 if pat_lower in input_lower:
@@ -307,18 +306,7 @@ class LLMRouter:
         
         skill_list_text = "\n".join(skill_entries)
         prompt = self.SYSTEM_PROMPT.format(skill_list_text=skill_list_text)
-        
-        # 构造轻量 LLM 请求
-        llm_request = {
-            "model": "qwen3.6-35b-a3b-8bit",  # 用小模型
-            "messages": [
-                {"role": "system", "content": "你是一个技能路由助手，只返回 JSON。"},
-                {"role": "user", "content": f"用户输入: {user_input}\n\n请从上述技能中选择最相关的1-3个。"}
-            ],
-            "max_tokens": 100,
-            "temperature": 0.0,
-        }
-        
+
         # 通过 hermes CLI 调用 LLM（兼容各种 provider）
         try:
             import subprocess
@@ -432,23 +420,40 @@ class SkillRouter:
     def route(self, query: str, top_k: int = 5) -> List[Tuple[str, str, float, str]]:
         """
         三层路由，按优先级串联。
-        
+
         Args:
             query: 用户查询
             top_k: 最大返回数量
-            
+
         Returns:
             [(skill_name, skill_path, score, method), ...]
             method: "rule" | "bm25" | "llm"
+            skill_path is always an absolute path to the SKILL.md file.
         """
         if not query or len(query.strip()) < 3:
             return []
-        
+
         # ── Layer 1: Rule Router ──
         rule_results = self.rule_router.route(query)
         if rule_results:
-            logger.debug("RuleRouter matched %d skills: %s", len(rule_results), [r[0] for r in rule_results])
-            return [(name, path, score, method) for name, path, score, method in rule_results[:top_k]]
+            # RuleRouter returns (sid, sid, score, "rule") where both are skill IDs.
+            # Resolve to full SKILL.md paths for downstream consumers.
+            resolved = []
+            for skill_id, _, score, method in rule_results[:top_k]:
+                # Try standard layout: skills_dir/skill_id/SKILL.md
+                candidate = self.skills_dir / skill_id / "SKILL.md"
+                if candidate.exists():
+                    resolved.append((skill_id, str(candidate.resolve()), score, method))
+                else:
+                    # Fallback: search recursively
+                    matches = list(self.skills_dir.rglob(f"{skill_id}/SKILL.md"))
+                    if matches:
+                        resolved.append((skill_id, str(matches[0].resolve()), score, method))
+                    else:
+                        # Last resort: try as-is (for BM25-style path)
+                        resolved.append((skill_id, skill_id, score, method))
+            logger.debug("RuleRouter matched %d skills: %s", len(resolved), [r[0] for r in resolved])
+            return resolved
         
         # ── Layer 2: BM25 Index ──
         try:
