@@ -265,11 +265,11 @@ class TestBuildSkillsPromptWithQuery:
             )
 
         # Should contain the injection header
-        assert "## Relevant Skills (auto-selected by BM25)" in result
+        assert "## Relevant Skills (auto-selected by hybrid router)" in result
         # Should contain the weather skill's content
         assert "weather" in result
         # Should contain the injection instruction
-        assert "Do NOT attempt to load" in result
+        assert "Do NOT load any other skills" in result
 
     @patch("agent.prompt_builder.get_all_skills_dirs")
     @patch("agent.prompt_builder.get_skills_dir")
